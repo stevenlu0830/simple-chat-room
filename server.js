@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
@@ -220,6 +221,26 @@ const heartbeat = setInterval(() => {
 
 wss.on('close', () => clearInterval(heartbeat));
 
+// ---------------------------------------------------------------------------
+// 5. Convenience: `npm start` passes --open so the room pops up in your default
+//    browser. The tests spawn this same file *without* the flag, so a test run
+//    never launches browser windows.
+// ---------------------------------------------------------------------------
+
+function openInBrowser(url) {
+  const [command, args] =
+    process.platform === 'darwin' ? ['open', [url]]
+    : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]]
+    : ['xdg-open', [url]];
+
+  const child = spawn(command, args, { stdio: 'ignore', detached: true });
+  // No browser, or no `xdg-open` on a bare Linux box: say so and keep serving.
+  child.on('error', () => console.log(`Could not open a browser — visit ${url}`));
+  child.unref(); // don't hold the event loop open on the child
+}
+
 server.listen(PORT, () => {
-  console.log(`Chat room on http://localhost:${PORT}`);
+  const url = `http://localhost:${PORT}`;
+  console.log(`Chat room on ${url}`);
+  if (process.argv.includes('--open')) openInBrowser(url);
 });

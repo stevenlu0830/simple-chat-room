@@ -6,11 +6,16 @@ talking to one real server.
 
 ```bash
 npm install
-npm start        # http://localhost:3000
+npm start        # serves on :3000 and opens it in your default browser
+npm run serve    # same, without opening a browser
 npm test         # the end-to-end suite
 ```
 
-Open two browser windows to see it work. `?room=standup` puts you in a separate room.
+Open a second window to see it work — messages cross between them live. `?room=standup` puts you
+in a separate room.
+
+The browser only opens because `npm start` passes `--open`; the test suite spawns this same
+`server.js` without the flag, so a test run never launches windows.
 
 | File | What's in it |
 | --- | --- |
