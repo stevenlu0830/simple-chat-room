@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Simple Chat Room</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <!-- Screen 1: pick a name -->
+    <form id="join-form" class="join" data-testid="join-form">
+      <h1>Simple Chat Room</h1>
+      <label for="name-input">Choose a display name</label>
+      <input
+        id="name-input"
+        data-testid="name-input"
+        autocomplete="off"
+        maxlength="32"
+        placeholder="e.g. ada"
+        required
+      />
+      <button type="submit" data-testid="join-button">Join</button>
+      <p class="error" data-testid="join-error" hidden></p>
+    </form>
+
+    <!-- Screen 2: the room -->
+    <main id="room" class="room" data-testid="room" hidden>
+      <header>
+        <div>
+          <strong data-testid="room-title">Chat room</strong>
+          <span class="status" data-testid="status" data-state="connecting">connecting…</span>
+        </div>
+        <div class="users" data-testid="user-list"></div>
+      </header>
+
+      <ul id="messages" class="messages" data-testid="messages"></ul>
+
+      <p class="typing" data-testid="typing-indicator"></p>
+
+      <form id="chat-form" class="composer" data-testid="chat-form">
+        <input
+          id="message-input"
+          data-testid="message-input"
+          autocomplete="off"
+          placeholder="Message"
+          maxlength="2000"
+        />
+        <button type="submit" data-testid="send-button">Send</button>
+      </form>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
