@@ -86,7 +86,17 @@ button:hover { filter: brightness(1.1); }
 .status[data-state="reconnecting"] { color: #fbbf24; }
 .status[data-state="disconnected"] { color: #ff6b6b; }
 
+.header-right { display: flex; align-items: center; gap: 12px; }
 .users { color: var(--muted); font-size: 12px; text-align: right; }
+
+button.ghost {
+  padding: 5px 12px;
+  font-size: 13px;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+button.ghost:hover { color: var(--text); border-color: var(--muted); filter: none; }
 
 .messages {
   flex: 1;

@@ -73,11 +73,19 @@ server.on('upgrade', (req, socket, head) => {
 const MAX_HISTORY = 50;
 const MAX_MESSAGE_LENGTH = 2000;
 
+// A dropped socket and a departing user look identical from here, so we wait
+// before announcing anyone's departure. A refresh, a tunnel, or a phone
+// switching to cellular all reconnect well inside this window.
+const REJOIN_GRACE_MS = Number(process.env.GRACE_MS) || 5000;
+
 /**
  * One entry per room. A room is just a set of sockets plus a message log —
  * "broadcasting" means looping over that set. Nothing here is persisted.
+ * `disconnected` holds users whose socket dropped but whose seat we're still
+ * keeping warm: name -> the timer that will announce their departure.
  * @type {Map<string, {history: Array<{id: number, user: string, text: string, at: number}>,
  *                     clients: Map<import('ws').WebSocket, {user: string|null, alive: boolean}>,
+ *                     disconnected: Map<string, NodeJS.Timeout>,
  *                     nextMessageId: number}>}
  */
 const rooms = new Map();
@@ -85,10 +93,16 @@ const rooms = new Map();
 function getRoom(name) {
   let room = rooms.get(name);
   if (!room) {
-    room = { history: [], clients: new Map(), nextMessageId: 1 };
+    room = { history: [], clients: new Map(), disconnected: new Map(), nextMessageId: 1 };
     rooms.set(name, room);
   }
   return room;
+}
+
+// Keep an empty room alive while anyone might still come back — otherwise the
+// last person to refresh loses the room's history.
+function dropRoomIfEmpty(roomName, room) {
+  if (room.clients.size === 0 && room.disconnected.size === 0) rooms.delete(roomName);
 }
 
 function send(ws, payload) {
@@ -103,11 +117,22 @@ function broadcast(room, payload, { except } = {}) {
 }
 
 function userList(room) {
-  return [...room.clients.values()].map((c) => c.user).filter(Boolean).sort();
+  const live = [...room.clients.values()].map((c) => c.user).filter(Boolean);
+  // People inside their grace window still count as present — that's the point
+  // of the grace window: to the room, a blip never happened.
+  return [...new Set([...live, ...room.disconnected.keys()])].sort();
 }
 
 function broadcastUsers(room) {
   broadcast(room, { type: 'users', users: userList(room) });
+}
+
+/** The one place a departure becomes visible, however it was triggered. */
+function announceDeparture(room, name) {
+  // Clear any typing indicator they left behind, or it sticks around forever.
+  broadcast(room, { type: 'typing', user: name, on: false });
+  broadcast(room, { type: 'system', text: `${name} left`, at: Date.now() });
+  broadcastUsers(room);
 }
 
 // ---------------------------------------------------------------------------
@@ -140,16 +165,41 @@ wss.on('connection', (ws, req, roomName) => {
           send(ws, { type: 'error', message: 'Name required' });
           return;
         }
-        if (userList(room).includes(name)) {
+        // Someone reclaiming a seat we're holding for them. Names aren't real
+        // identity, so this trusts whoever asks first — good enough for a room
+        // where names are already first-come-first-served.
+        const graceTimer = room.disconnected.get(name);
+        const returning = graceTimer !== undefined;
+        if (returning) {
+          clearTimeout(graceTimer);
+          room.disconnected.delete(name);
+        }
+
+        if (!returning && userList(room).includes(name)) {
           send(ws, { type: 'error', message: 'That name is taken' });
           return;
         }
         state.user = name;
 
-        // Catch the newcomer up on what they missed, then tell everyone.
+        // Catch them up on what they missed either way.
         send(ws, { type: 'welcome', user: name, room: roomName, history: room.history });
-        broadcast(room, { type: 'system', text: `${name} joined`, at: Date.now() });
-        broadcastUsers(room);
+
+        // A returning user was never marked absent, so there is nothing to
+        // announce and the presence list is already correct. Staying silent
+        // here is what stops a refresh from spamming "left" then "joined".
+        if (!returning) {
+          broadcast(room, { type: 'system', text: `${name} joined`, at: Date.now() });
+          broadcastUsers(room);
+        }
+        break;
+      }
+
+      // An explicit "I'm leaving" — no grace period, because there's no doubt.
+      case 'leave': {
+        if (!state.user) return;
+        const name = state.user;
+        state.user = null; // so 'close' doesn't also start a grace timer
+        announceDeparture(room, name);
         break;
       }
 
@@ -187,12 +237,22 @@ wss.on('connection', (ws, req, roomName) => {
   ws.on('close', () => {
     const state = room.clients.get(ws);
     room.clients.delete(ws);
+
+    // We can't tell "closed the tab" from "went into a tunnel" — both arrive
+    // here identically. So say nothing yet and start a countdown; if they
+    // reconnect first, 'join' cancels it and the room never noticed.
     if (state?.user) {
-      broadcast(room, { type: 'system', text: `${state.user} left`, at: Date.now() });
-      broadcastUsers(room);
+      const name = state.user;
+      const timer = setTimeout(() => {
+        room.disconnected.delete(name);
+        announceDeparture(room, name);
+        dropRoomIfEmpty(roomName, room);
+      }, REJOIN_GRACE_MS);
+      room.disconnected.set(name, timer);
     }
+
     // Drop empty rooms so a long-running server doesn't leak history forever.
-    if (room.clients.size === 0) rooms.delete(roomName);
+    dropRoomIfEmpty(roomName, room);
   });
 
   ws.on('error', () => ws.terminate());

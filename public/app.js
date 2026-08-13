@@ -6,6 +6,7 @@ const nameInput = document.querySelector('[data-testid="name-input"]');
 const joinError = document.querySelector('[data-testid="join-error"]');
 const room = document.querySelector('[data-testid="room"]');
 const roomTitle = document.querySelector('[data-testid="room-title"]');
+const leaveButton = document.querySelector('[data-testid="leave-button"]');
 const statusEl = document.querySelector('[data-testid="status"]');
 const userList = document.querySelector('[data-testid="user-list"]');
 const messages = document.querySelector('[data-testid="messages"]');
@@ -19,6 +20,7 @@ const roomName = new URLSearchParams(location.search).get('room') || 'lobby';
 let ws = null;
 let username = null; // set only once the server confirms with `welcome`
 let pendingName = null;
+let leaving = false; // true only while a deliberate departure is in flight
 let reconnectAttempts = 0;
 let typingTimer = null;
 let sentTyping = false;
@@ -50,7 +52,11 @@ function connect() {
     handle(JSON.parse(event.data));
   });
 
-  ws.addEventListener('close', () => {
+  ws.addEventListener('close', (event) => {
+    // `close` fires for every disconnect, so this is where intent gets sorted
+    // out. 1006 (died with no goodbye) is the crash/wifi case worth retrying;
+    // 1000 means someone hung up on purpose and we should respect it.
+    if (leaving || event.code === 1000) return;
     setStatus('disconnected');
     scheduleReconnect();
   });
@@ -171,7 +177,36 @@ joinForm.addEventListener('submit', (e) => {
   if (!name) return;
   joinError.hidden = true;
   pendingName = name;
-  send({ type: 'join', user: name });
+
+  if (ws?.readyState === WebSocket.OPEN) {
+    send({ type: 'join', user: name });
+  } else {
+    // Rejoining after a Leave: the old socket is gone, so open a new one and
+    // let the 'open' handler send the join with `pendingName`.
+    leaving = false;
+    reconnectAttempts = 0;
+    connect();
+  }
+});
+
+leaveButton.addEventListener('click', () => {
+  // Tell the server first so it skips the grace period, *then* close. Data
+  // already queued with send() is flushed before the close frame goes out.
+  leaving = true;
+  stopTyping();
+  send({ type: 'leave' });
+  ws?.close(1000, 'user left');
+
+  username = null;
+  pendingName = null;
+  typingUsers.clear();
+  renderTyping();
+  messages.replaceChildren();
+  userList.textContent = '';
+  room.hidden = true;
+  joinForm.hidden = false;
+  setStatus('disconnected');
+  nameInput.focus();
 });
 
 chatForm.addEventListener('submit', (e) => {

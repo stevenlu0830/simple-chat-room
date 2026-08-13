@@ -30,7 +30,10 @@
           <strong data-testid="room-title">Chat room</strong>
           <span class="status" data-testid="status" data-state="connecting">connecting…</span>
         </div>
-        <div class="users" data-testid="user-list"></div>
+        <div class="header-right">
+          <span class="users" data-testid="user-list"></span>
+          <button type="button" class="ghost" data-testid="leave-button">Leave</button>
+        </div>
       </header>
 
       <ul id="messages" class="messages" data-testid="messages"></ul>

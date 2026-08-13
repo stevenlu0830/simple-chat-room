@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { GRACE_MS } from '../playwright.config.js';
 
 // Server state lives in memory and outlives a single test, so every test gets
 // its own room. That's the isolation boundary — without it, test N sees the
@@ -85,12 +86,93 @@ test.describe('real-time chat', () => {
     await expect(host.page.getByTestId('user-list')).toContainText('2 online');
     await expect(host.page.getByTestId('user-list')).toContainText(guest.name);
 
-    // Closing the context kills the socket the way closing a tab would.
+    // Closing the context kills the socket the way closing a tab would. The
+    // departure is announced only once the grace period expires without them.
     await guest.context.close();
+    await expect(host.page.getByTestId('messages')).toContainText(`${guest.name} left`, { timeout: 8000 });
     await expect(host.page.getByTestId('user-list')).toContainText(`1 online: ${host.name}`);
-    await expect(host.page.getByTestId('messages')).toContainText(`${guest.name} left`);
 
     await host.context.close();
+  });
+
+  test('leaving deliberately is immediate and stays left', async ({ browser }, testInfo) => {
+    const room = roomFor(testInfo);
+    const stayer = await openClient(browser, room, 'stayer');
+    const quitter = await openClient(browser, room, 'quitter');
+
+    // Nothing should dial back out after this point. Watching for the socket
+    // itself is what pins the `leaving` guard down: without it the client
+    // reopens a connection it has no use for.
+    const socketsAfterLeave = [];
+    quitter.page.on('websocket', (socket) => socketsAfterLeave.push(socket.url()));
+
+    await quitter.page.getByTestId('leave-button').click();
+
+    // Back at the join screen...
+    await expect(quitter.page.getByTestId('join-form')).toBeVisible();
+    await expect(quitter.page.getByTestId('room')).toBeHidden();
+
+    // ...and it sticks. Asserting that something *doesn't* happen is the one
+    // case a real wait is required — no assertion can retry its way to proving
+    // absence. The first backoff attempt would fire at 1s, so outlast it.
+    await quitter.page.waitForTimeout(2500);
+    await expect(quitter.page.getByTestId('room')).toBeHidden();
+    await expect(quitter.page.getByTestId('join-form')).toBeVisible();
+    expect(socketsAfterLeave, 'a deliberate leave must not reconnect').toEqual([]);
+
+    // No grace period for an explicit leave: the room hears about it at once.
+    await expect(stayer.page.getByTestId('messages')).toContainText('quitter left');
+    await expect(stayer.page.getByTestId('user-list')).toContainText('1 online: stayer');
+
+    await stayer.context.close();
+    await quitter.context.close();
+  });
+
+  test('a user who left can rejoin', async ({ browser }, testInfo) => {
+    const room = roomFor(testInfo);
+    const stayer = await openClient(browser, room, 'stayer');
+    await say(stayer.page, 'still here');
+
+    const guest = await openClient(browser, room, 'guest');
+    await guest.page.getByTestId('leave-button').click();
+    await expect(stayer.page.getByTestId('user-list')).toContainText('1 online');
+
+    // Same name is free again, and the backlog comes back with them.
+    await guest.page.getByTestId('name-input').fill('guest');
+    await guest.page.getByTestId('join-button').click();
+    await expect(guest.page.getByTestId('status')).toHaveText('connected');
+    await expect(bubbles(guest.page)).toHaveText(['still here']);
+    await expect(stayer.page.getByTestId('user-list')).toContainText('2 online');
+
+    await stayer.context.close();
+    await guest.context.close();
+  });
+
+  test('a refresh does not announce a departure', async ({ browser }, testInfo) => {
+    const room = roomFor(testInfo);
+    const watcher = await openClient(browser, room, 'watcher');
+    const refresher = await openClient(browser, room, 'refresher');
+    await expect(watcher.page.getByTestId('user-list')).toContainText('2 online');
+
+    // A reload drops the socket exactly like a crash would — the server can't
+    // tell the difference, which is why it waits before saying anything.
+    await refresher.page.reload();
+    await refresher.page.getByTestId('name-input').fill('refresher');
+    await refresher.page.getByTestId('join-button').click();
+    await expect(refresher.page.getByTestId('status')).toHaveText('connected');
+
+    // Genuinely wait out the grace window — a retrying assertion would pass at
+    // t=0 and never see the "left" that a missing grace period would emit.
+    await watcher.page.waitForTimeout(GRACE_MS + 1000);
+
+    // The room never noticed: no "left", and no second "joined" either.
+    // Everyone sees their own join too, so the baseline is both arrivals.
+    await expect(watcher.page.getByTestId('system-message'))
+      .toHaveText(['watcher joined', 'refresher joined']);
+    await expect(watcher.page.getByTestId('user-list')).toContainText('2 online');
+
+    await watcher.context.close();
+    await refresher.context.close();
   });
 
   test('the typing indicator turns on and off', async ({ browser }, testInfo) => {

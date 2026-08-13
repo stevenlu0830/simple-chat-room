@@ -140,6 +140,42 @@ setTimeout(connect, delay);
 Also: `error` never tells you why (the browser hides the reason deliberately), and `close` always
 follows it — so put your recovery logic in `close` and treat `error` as a status update only.
 
+**4. `close` can't tell you what happened, so you have to.** Leaving on purpose, closing the tab,
+and driving into a tunnel all arrive as the same event, on both ends of the socket. Each side
+handles that differently.
+
+The client uses an explicit flag plus the close code — `1006` means the socket died with no
+goodbye (retry that), `1000` means somebody hung up deliberately (don't):
+
+```js
+ws.addEventListener('close', (event) => {
+  if (leaving || event.code === 1000) return;   // deliberate — stay gone
+  setStatus('disconnected');
+  scheduleReconnect();
+});
+```
+
+The server can't see close codes as intent either, so it waits instead of guessing. On disconnect
+it holds the user's seat for `REJOIN_GRACE_MS` rather than announcing anything; `join` cancels the
+timer if they come back. Without this, a refresh produces "ada left" immediately followed by
+"ada joined" — the better your reconnect logic, the more of this noise you generate.
+
+```js
+// server.js — on 'close'
+const timer = setTimeout(() => {
+  room.disconnected.delete(name);
+  announceDeparture(room, name);
+}, REJOIN_GRACE_MS);
+room.disconnected.set(name, timer);
+```
+
+Users inside that window still count as present, so the presence list doesn't flicker and nobody
+can steal the name. Pressing **Leave** sends `{ type: 'leave' }` first, which skips the grace
+period entirely — there's no ambiguity about that one.
+
+Worth knowing: this treats the name as identity, so someone joining as `ada` during ada's grace
+window silently inherits the seat. Real apps hand out a session token at join and match on that.
+
 ---
 
 ## Part 2: how to test this end to end
@@ -176,7 +212,7 @@ webServer: {
 }
 ```
 
-### The rule that kills flakiness: never sleep
+### The rule that kills flakiness: never sleep (with one exception)
 
 The instinct with async messaging is `await page.waitForTimeout(500)`. Don't. It's slow when the
 socket is fast and flaky when it isn't. Playwright's assertions retry until they pass or time out,
@@ -186,14 +222,26 @@ so express the *condition* instead:
 await expect(bubbles(grace.page)).toHaveText(['hello world']);   // retries until delivered
 ```
 
-There is not a single `waitForTimeout` in this suite, and it runs in about 4 seconds.
-
 Same rule for setup — after clicking Join, wait for the server's answer, not for a duration:
 
 ```js
 await expect(page.getByTestId('room')).toBeVisible();
 await expect(page.getByTestId('status')).toHaveText('connected');
 ```
+
+**The exception is proving a negative.** "A refresh must *not* announce a departure" and "leaving
+must *not* reconnect" are claims about something never happening, and no retrying assertion can
+establish that — it passes the instant the condition holds, which is immediately, before the thing
+you're worried about would even have occurred. Two of these tests were silently vacuous until the
+retrying assertion was replaced with a real wait:
+
+```js
+await watcher.page.waitForTimeout(GRACE_MS + 1000);   // outlast the window...
+await expect(watcher.page.getByTestId('system-message'))
+  .toHaveText(['watcher joined', 'refresher joined']);   // ...then assert nothing appeared
+```
+
+The grace period is `GRACE_MS`-configurable precisely so these waits stay short in tests.
 
 ### Isolate state, or tests only fail in CI
 
@@ -233,8 +281,9 @@ Note the server-ready detection: `startServer` resolves on the "Chat room on" st
 a guessed delay. Same no-sleeping rule, applied to process management.
 
 Other failure paths worth covering, all of them in the suite: a disconnect updates everyone else's
-presence list, a duplicate name is rejected without entering the room, a late joiner gets the
-backlog, and a message containing `<img src=x onerror=...>` renders as text rather than executing.
+presence list once the grace period lapses, a refresh passes unnoticed, Leave is immediate and
+stays left, a leaver can rejoin under the same name, a duplicate name is rejected without entering
+the room, and a message containing `<img src=x onerror=...>` renders as text rather than executing.
 
 ### Assert on stable hooks
 
